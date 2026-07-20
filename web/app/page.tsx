@@ -1,16 +1,25 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-type Tool = "tiktok" | "instagram" | "caption" | "uniquify" | "subtitles";
+type Tool = "tiktok" | "instagram" | "caption" | "uniquify" | "subtitles" | "profile" | "history";
 type Status = "idle" | "uploading" | "processing" | "done" | "error";
+
+type VideoMeta = {
+  caption?: string;
+  author?: string;
+  authorUrl?: string;
+  sourceUrl?: string;
+};
 
 const TABS: { key: Tool; label: string; emoji: string; desc: string }[] = [
   { key: "tiktok", label: "TikTok HD", emoji: "⬇️", desc: "Colle un lien TikTok → vidéo HD sans watermark." },
-  { key: "instagram", label: "Reels IG", emoji: "📸", desc: "Colle un lien de Reel Instagram → vidéo téléchargée." },
+  { key: "instagram", label: "Reels IG", emoji: "📸", desc: "Colle un lien de Reel Instagram → vidéo HD téléchargée." },
+  { key: "profile", label: "Compte", emoji: "👤", desc: "Colle un lien de compte TikTok ou Instagram → choisis les vidéos à télécharger." },
   { key: "caption", label: "Légende", emoji: "✍️", desc: "Upload une vidéo + une légende → rendu propre." },
   { key: "uniquify", label: "Rendre unique", emoji: "🌀", desc: "Même vidéo, empreinte différente pour le repost." },
   { key: "subtitles", label: "Sous-titres", emoji: "💬", desc: "Transcription auto de la voix → sous-titres incrustés." },
+  { key: "history", label: "Historique", emoji: "🕘", desc: "Tes téléchargements passés — légendes et liens des auteurs." },
 ];
 
 function Logo({ size = 52 }: { size?: number }) {
@@ -75,6 +84,10 @@ export default function Home() {
                 : "https://www.instagram.com/reel/…"
             }
           />
+        ) : tab === "profile" ? (
+          <ProfileTool key={tab} />
+        ) : tab === "history" ? (
+          <HistoryTool key={tab} />
         ) : (
           <VideoTool tool={tab} key={tab} />
         )}
@@ -91,6 +104,7 @@ function useJobRunner() {
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+  const [meta, setMeta] = useState<VideoMeta | null>(null);
 
   async function poll(id: string) {
     setStatus("processing");
@@ -100,6 +114,7 @@ function useJobRunner() {
       const j = await res.json();
       if (j.status === "done") {
         setDownloadUrl(j.downloadUrl);
+        setMeta(j.meta || null);
         setStatus("done");
         return;
       }
@@ -117,14 +132,15 @@ function useJobRunner() {
     setStatus("idle");
     setError(null);
     setDownloadUrl(null);
+    setMeta(null);
   }
 
-  return { status, setStatus, error, setError, downloadUrl, poll, reset };
+  return { status, setStatus, error, setError, downloadUrl, meta, poll, reset };
 }
 
 function UrlTool({ type, placeholder }: { type: "tiktok" | "instagram"; placeholder: string }) {
   const [url, setUrl] = useState("");
-  const { status, setStatus, error, setError, downloadUrl, poll, reset } = useJobRunner();
+  const { status, setStatus, error, setError, downloadUrl, meta, poll, reset } = useJobRunner();
 
   async function run() {
     reset();
@@ -154,6 +170,390 @@ function UrlTool({ type, placeholder }: { type: "tiktok" | "instagram"; placehol
       />
       <RunButton disabled={!url || status === "processing"} onClick={run} status={status} />
       <Result status={status} error={error} downloadUrl={downloadUrl} />
+      {status === "done" && <MetaCard meta={meta} />}
+    </div>
+  );
+}
+
+// Carte affichée après un téléchargement : légende d'origine + liens de l'auteur.
+function MetaCard({ meta }: { meta: VideoMeta | null }) {
+  const [copied, setCopied] = useState(false);
+  if (!meta || (!meta.caption && !meta.author)) return null;
+
+  function copy() {
+    navigator.clipboard.writeText(meta?.caption || "").then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+
+  return (
+    <div className="space-y-2 rounded-lg bg-black/20 px-4 py-3 text-sm">
+      {meta.author && (
+        <p className="text-zinc-300">
+          👤{" "}
+          {meta.authorUrl ? (
+            <a
+              href={meta.authorUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-emerald-300 hover:underline"
+            >
+              {meta.author}
+            </a>
+          ) : (
+            <span className="font-semibold">{meta.author}</span>
+          )}
+          {meta.sourceUrl && (
+            <>
+              {" · "}
+              <a
+                href={meta.sourceUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-zinc-400 hover:underline"
+              >
+                voir la publication
+              </a>
+            </>
+          )}
+        </p>
+      )}
+      {meta.caption && (
+        <>
+          <p className="whitespace-pre-wrap break-words text-zinc-400">{meta.caption}</p>
+          <button
+            onClick={copy}
+            className="rounded-full bg-white/5 px-3 py-1 text-xs text-zinc-300 hover:bg-white/10"
+          >
+            {copied ? "✅ copiée !" : "📋 Copier la légende"}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---- Compte : liste les vidéos d'un profil TikTok/Instagram à télécharger ----
+
+type ProfileVideo = { url: string; id: string; title: string; thumbnail: string };
+
+function ProfileTool() {
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [author, setAuthor] = useState("");
+  const [authorUrl, setAuthorUrl] = useState("");
+  const [videos, setVideos] = useState<ProfileVideo[]>([]);
+
+  async function run() {
+    setBusy(true);
+    setError(null);
+    setVideos([]);
+    setAuthor("");
+    setAuthorUrl("");
+    try {
+      const res = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "profile", params: { url } }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error);
+      for (let i = 0; i < 90; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const d = await (await fetch(`/api/jobs/${j.id}`)).json();
+        if (d.status === "done") {
+          const m = d.meta || {};
+          const vids: ProfileVideo[] = Array.isArray(m.videos) ? m.videos : [];
+          setAuthor(m.author || "");
+          setAuthorUrl(m.authorUrl || "");
+          setVideos(vids);
+          if (!vids.length)
+            setError(
+              "Aucune vidéo trouvée — compte privé, ou la plateforme bloque le listing. Réessaie, ou colle directement le lien d'une vidéo."
+            );
+          setBusy(false);
+          return;
+        }
+        if (d.status === "error") throw new Error(d.error || "Le listing a échoué.");
+      }
+      throw new Error("Délai dépassé.");
+    } catch (e: any) {
+      setError(e.message);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <input
+        value={url}
+        onChange={(e) => setUrl(e.target.value)}
+        placeholder="https://www.tiktok.com/@compte  ou  https://www.instagram.com/compte/"
+        className="w-full rounded-lg border border-white/10 bg-black/30 px-4 py-3 outline-none focus:border-brand"
+      />
+      <RunButton
+        disabled={!url || busy}
+        onClick={run}
+        status={busy ? "processing" : "idle"}
+        label="Lister les vidéos"
+      />
+      {busy && (
+        <p className="text-center text-sm text-zinc-400">
+          ⏳ Un instant, on récupère les vidéos du compte…
+        </p>
+      )}
+      {error && (
+        <p className="rounded-lg bg-red-500/10 px-4 py-3 text-sm text-red-300">⚠️ {error}</p>
+      )}
+      {author && (
+        <p className="text-sm text-zinc-300">
+          👤{" "}
+          {authorUrl ? (
+            <a
+              href={authorUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="font-semibold text-emerald-300 hover:underline"
+            >
+              {author}
+            </a>
+          ) : (
+            <span className="font-semibold">{author}</span>
+          )}
+          {videos.length > 0 && (
+            <span className="text-zinc-500"> · {videos.length} vidéo(s)</span>
+          )}
+        </p>
+      )}
+      {videos.length > 0 && (
+        <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
+          {videos.map((v) => (
+            <ProfileVideoRow key={v.url} v={v} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProfileVideoRow({ v }: { v: ProfileVideo }) {
+  const [st, setSt] = useState<"idle" | "processing" | "done" | "error">("idle");
+  const [dl, setDl] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function grab() {
+    setSt("processing");
+    setErr(null);
+    try {
+      const type = v.url.includes("instagram.") ? "instagram" : "tiktok";
+      const res = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type, params: { url: v.url } }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error);
+      for (let i = 0; i < 150; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const d = await (await fetch(`/api/jobs/${j.id}`)).json();
+        if (d.status === "done") {
+          setDl(d.downloadUrl);
+          setSt("done");
+          return;
+        }
+        if (d.status === "error") throw new Error(d.error || "Le téléchargement a échoué.");
+      }
+      throw new Error("Délai dépassé.");
+    } catch (e: any) {
+      setErr(e.message);
+      setSt("error");
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-3 rounded-lg bg-black/20 px-3 py-2 text-sm">
+      {v.thumbnail ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={v.thumbnail}
+          alt=""
+          className="h-12 w-9 rounded object-cover"
+          onError={(e) => {
+            (e.target as HTMLImageElement).style.display = "none";
+          }}
+        />
+      ) : (
+        <span className="flex h-12 w-9 items-center justify-center rounded bg-white/5">🎬</span>
+      )}
+      <span className="min-w-0 flex-1 truncate text-zinc-300">{v.title || v.id || "Vidéo"}</span>
+      {st === "idle" && (
+        <button
+          onClick={grab}
+          className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-dark"
+        >
+          Télécharger
+        </button>
+      )}
+      {st === "processing" && <span className="text-xs text-zinc-500">⏳ en cours…</span>}
+      {st === "error" && (
+        <button
+          onClick={grab}
+          title={err || ""}
+          className="rounded-lg bg-red-500/20 px-3 py-1.5 text-xs text-red-300 hover:bg-red-500/30"
+        >
+          ⚠️ réessayer
+        </button>
+      )}
+      {st === "done" && dl && (
+        <a
+          href={dl}
+          download
+          className="rounded-lg bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25"
+        >
+          ✅ enregistrer
+        </a>
+      )}
+    </div>
+  );
+}
+
+// ---- Historique : téléchargements passés + légendes + liens auteurs ----
+
+type HistoryItem = {
+  id: string;
+  type: string;
+  url: string;
+  caption: string;
+  author: string;
+  authorUrl: string;
+  createdAt: string;
+};
+
+function HistoryTool() {
+  const [items, setItems] = useState<HistoryItem[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/jobs")
+      .then((r) => r.json())
+      .then((j) => setItems(j.items || []))
+      .catch(() => setError("Impossible de charger l'historique."));
+  }, []);
+
+  if (error)
+    return <p className="rounded-lg bg-red-500/10 px-4 py-3 text-sm text-red-300">⚠️ {error}</p>;
+  if (items === null)
+    return <p className="text-center text-sm text-zinc-400">⏳ Chargement de l'historique…</p>;
+  if (!items.length)
+    return (
+      <p className="text-center text-sm text-zinc-500">
+        Aucun téléchargement pour l'instant — passe par TikTok HD ou Reels IG, puis reviens ici.
+      </p>
+    );
+
+  return (
+    <div className="max-h-[28rem] space-y-2 overflow-y-auto pr-1">
+      {items.map((it) => (
+        <HistoryRow key={it.id} it={it} />
+      ))}
+    </div>
+  );
+}
+
+function HistoryRow({ it }: { it: HistoryItem }) {
+  const [dl, setDl] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  async function getLink() {
+    setBusy(true);
+    try {
+      const d = await (await fetch(`/api/jobs/${it.id}`)).json();
+      setDl(d.downloadUrl || null);
+    } catch {}
+    setBusy(false);
+  }
+
+  function copy() {
+    navigator.clipboard.writeText(it.caption).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+
+  const date = new Date(it.createdAt);
+  const dateTxt = isNaN(date.getTime())
+    ? ""
+    : date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }) +
+      " " +
+      date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+
+  return (
+    <div className="space-y-1.5 rounded-lg bg-black/20 px-4 py-3 text-sm">
+      <div className="flex items-center justify-between gap-2">
+        <span className="min-w-0 flex-1 truncate text-zinc-300">
+          {it.type === "instagram" ? "📸" : "⬇️"}{" "}
+          {it.author ? (
+            it.authorUrl ? (
+              <a
+                href={it.authorUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="font-semibold text-emerald-300 hover:underline"
+              >
+                {it.author}
+              </a>
+            ) : (
+              <span className="font-semibold">{it.author}</span>
+            )
+          ) : (
+            <span className="text-zinc-500">auteur inconnu</span>
+          )}
+          {dateTxt && <span className="text-xs text-zinc-600"> · {dateTxt}</span>}
+        </span>
+        {dl ? (
+          <a
+            href={dl}
+            download
+            className="shrink-0 rounded-lg bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25"
+          >
+            ✅ enregistrer
+          </a>
+        ) : (
+          <button
+            onClick={getLink}
+            disabled={busy}
+            className="shrink-0 rounded-lg bg-white/5 px-3 py-1.5 text-xs text-zinc-300 hover:bg-white/10 disabled:opacity-50"
+          >
+            {busy ? "⏳…" : "⬇️ re-télécharger"}
+          </button>
+        )}
+      </div>
+      {it.url && (
+        <a
+          href={it.url}
+          target="_blank"
+          rel="noreferrer"
+          className="block truncate text-xs text-zinc-500 hover:text-zinc-300 hover:underline"
+        >
+          🔗 {it.url}
+        </a>
+      )}
+      {it.caption && (
+        <div className="flex items-start gap-2">
+          <p className="line-clamp-2 min-w-0 flex-1 whitespace-pre-wrap break-words text-xs text-zinc-400">
+            {it.caption}
+          </p>
+          <button
+            onClick={copy}
+            className="shrink-0 rounded-full bg-white/5 px-2 py-1 text-[10px] text-zinc-300 hover:bg-white/10"
+          >
+            {copied ? "✅" : "📋 copier"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
