@@ -21,5 +21,6 @@ export async function GET(
     status: job.status,
     error: job.error,
     downloadUrl,
+    meta: job.meta || null,
   });
 }
