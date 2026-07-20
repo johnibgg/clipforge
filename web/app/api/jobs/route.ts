@@ -13,11 +13,11 @@ export async function POST(req: NextRequest) {
     const type = body.type as JobType;
     const params = (body.params || {}) as Record<string, unknown>;
 
-    if (!["tiktok", "instagram", "caption", "uniquify", "subtitles"].includes(type)) {
+    if (!["tiktok", "instagram", "caption", "uniquify", "subtitles", "profile"].includes(type)) {
       return NextResponse.json({ error: "type invalide" }, { status: 400 });
     }
 
-    if (type === "tiktok" || type === "instagram") {
+    if (type === "tiktok" || type === "instagram" || type === "profile") {
       if (!params.url || typeof params.url !== "string") {
         return NextResponse.json({ error: "url requise" }, { status: 400 });
       }
@@ -35,5 +35,46 @@ export async function POST(req: NextRequest) {
   } catch (e: any) {
     console.error(e);
     return NextResponse.json({ error: e.message || "erreur" }, { status: 500 });
+  }
+}
+
+// GET /api/jobs — historique : les 30 derniers téléchargements réussis,
+// avec la légende et les liens de l'auteur quand on les a.
+export async function GET() {
+  const base = `FROM jobs WHERE type IN ('tiktok','instagram') AND status='done'
+       ORDER BY created_at DESC LIMIT 30`;
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, type, params, meta, created_at ${base}`
+    );
+    return NextResponse.json({
+      items: rows.map((r: any) => ({
+        id: r.id,
+        type: r.type,
+        url: (r.params && r.params.url) || "",
+        caption: (r.meta && r.meta.caption) || "",
+        author: (r.meta && r.meta.author) || "",
+        authorUrl: (r.meta && r.meta.authorUrl) || "",
+        createdAt: r.created_at,
+      })),
+    });
+  } catch {
+    // Colonne meta absente (migration pas encore appliquée) : version minimale.
+    try {
+      const { rows } = await pool.query(`SELECT id, type, params, created_at ${base}`);
+      return NextResponse.json({
+        items: rows.map((r: any) => ({
+          id: r.id,
+          type: r.type,
+          url: (r.params && r.params.url) || "",
+          caption: "",
+          author: "",
+          authorUrl: "",
+          createdAt: r.created_at,
+        })),
+      });
+    } catch (e: any) {
+      return NextResponse.json({ items: [], error: e.message }, { status: 200 });
+    }
   }
 }
