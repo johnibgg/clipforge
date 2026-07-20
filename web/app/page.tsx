@@ -140,10 +140,12 @@ function useJobRunner() {
 
 function UrlTool({ type, placeholder }: { type: "tiktok" | "instagram"; placeholder: string }) {
   const [url, setUrl] = useState("");
+  const [submittedUrl, setSubmittedUrl] = useState("");
   const { status, setStatus, error, setError, downloadUrl, meta, poll, reset } = useJobRunner();
 
   async function run() {
     reset();
+    setSubmittedUrl(url);
     setStatus("processing");
     try {
       const res = await fetch("/api/jobs", {
@@ -171,6 +173,84 @@ function UrlTool({ type, placeholder }: { type: "tiktok" | "instagram"; placehol
       <RunButton disabled={!url || status === "processing"} onClick={run} status={status} />
       <Result status={status} error={error} downloadUrl={downloadUrl} />
       {status === "done" && <MetaCard meta={meta} />}
+      {status === "done" && meta?.authorUrl && (
+        <AuthorVideos
+          key={submittedUrl}
+          author={meta.author || ""}
+          authorUrl={meta.authorUrl}
+          excludeUrl={submittedUrl}
+        />
+      )}
+    </div>
+  );
+}
+
+// Après un téléchargement par lien : liste les autres vidéos du même compte,
+// avec sélection multiple pour un téléchargement en masse.
+function AuthorVideos({
+  author,
+  authorUrl,
+  excludeUrl,
+}: {
+  author: string;
+  authorUrl: string;
+  excludeUrl: string;
+}) {
+  const [state, setState] = useState<"loading" | "done" | "failed">("loading");
+  const [videos, setVideos] = useState<ProfileVideo[]>([]);
+
+  useEffect(() => {
+    let stop = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/jobs", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ type: "profile", params: { url: authorUrl } }),
+        });
+        const j = await res.json();
+        if (!res.ok) throw new Error(j.error);
+        for (let i = 0; i < 60; i++) {
+          await new Promise((r) => setTimeout(r, 2500));
+          if (stop) return;
+          const d = await (await fetch(`/api/jobs/${j.id}`)).json();
+          if (d.status === "done") {
+            const vids: ProfileVideo[] = (d.meta?.videos || []).filter(
+              (v: ProfileVideo) => v.url !== excludeUrl && !(v.id && excludeUrl.includes(v.id))
+            );
+            if (!stop) {
+              setVideos(vids);
+              setState("done");
+            }
+            return;
+          }
+          if (d.status === "error") throw new Error(d.error);
+        }
+        throw new Error("timeout");
+      } catch {
+        if (!stop) setState("failed");
+      }
+    })();
+    return () => {
+      stop = true;
+    };
+  }, [authorUrl, excludeUrl]);
+
+  if (state === "failed") return null;
+  if (state === "loading")
+    return (
+      <p className="text-center text-sm text-zinc-500">
+        ⏳ On regarde les autres vidéos {author ? `de ${author}` : "du compte"}…
+      </p>
+    );
+  if (!videos.length) return null;
+  return (
+    <div className="space-y-2 border-t border-white/10 pt-4">
+      <p className="text-sm font-semibold text-zinc-300">
+        🎯 Les autres vidéos {author ? `de ${author}` : "du compte"} — coche et télécharge en
+        masse :
+      </p>
+      <ProfileVideos videos={videos} />
     </div>
   );
 }
@@ -327,25 +407,41 @@ function ProfileTool() {
           )}
         </p>
       )}
-      {videos.length > 0 && (
-        <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
-          {videos.map((v) => (
-            <ProfileVideoRow key={v.url} v={v} />
-          ))}
-        </div>
-      )}
+      {videos.length > 0 && <ProfileVideos videos={videos} />}
     </div>
   );
 }
 
-function ProfileVideoRow({ v }: { v: ProfileVideo }) {
-  const [st, setSt] = useState<"idle" | "processing" | "done" | "error">("idle");
-  const [dl, setDl] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+// ---- Liste de vidéos : sélection multiple + téléchargement en masse ----
 
-  async function grab() {
-    setSt("processing");
-    setErr(null);
+type DlState = { st: "waiting" | "processing" | "done" | "error"; url?: string; err?: string };
+
+function ProfileVideos({ videos }: { videos: ProfileVideo[] }) {
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [dl, setDl] = useState<Record<string, DlState>>({});
+  const [running, setRunning] = useState(false);
+
+  const allSelected = videos.length > 0 && selected.size === videos.length;
+
+  function toggle(u: string) {
+    setSelected((s) => {
+      const n = new Set(s);
+      if (n.has(u)) n.delete(u);
+      else n.add(u);
+      return n;
+    });
+  }
+
+  function toggleAll() {
+    setSelected(allSelected ? new Set() : new Set(videos.map((v) => v.url)));
+  }
+
+  function setOne(u: string, s: DlState) {
+    setDl((m) => ({ ...m, [u]: s }));
+  }
+
+  async function downloadOne(v: ProfileVideo) {
+    setOne(v.url, { st: "processing" });
     try {
       const type = v.url.includes("instagram.") ? "instagram" : "tiktok";
       const res = await fetch("/api/jobs", {
@@ -355,25 +451,113 @@ function ProfileVideoRow({ v }: { v: ProfileVideo }) {
       });
       const j = await res.json();
       if (!res.ok) throw new Error(j.error);
-      for (let i = 0; i < 150; i++) {
-        await new Promise((r) => setTimeout(r, 2000));
+      for (let i = 0; i < 240; i++) {
+        await new Promise((r) => setTimeout(r, 2500));
         const d = await (await fetch(`/api/jobs/${j.id}`)).json();
         if (d.status === "done") {
-          setDl(d.downloadUrl);
-          setSt("done");
+          setOne(v.url, { st: "done", url: d.downloadUrl });
           return;
         }
         if (d.status === "error") throw new Error(d.error || "Le téléchargement a échoué.");
       }
       throw new Error("Délai dépassé.");
     } catch (e: any) {
-      setErr(e.message);
-      setSt("error");
+      setOne(v.url, { st: "error", err: e.message });
     }
   }
 
+  // Téléchargement en masse : 2 suivis à la fois côté client, le worker
+  // traite un par un derrière — chaque vidéo s'affiche dès qu'elle est prête.
+  async function bulk() {
+    const list = videos.filter((v) => selected.has(v.url) && dl[v.url]?.st !== "done");
+    if (!list.length) return;
+    setRunning(true);
+    setDl((m) => {
+      const n = { ...m };
+      for (const v of list) n[v.url] = { st: "waiting" };
+      return n;
+    });
+    let i = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(2, list.length) }, async () => {
+        while (i < list.length) {
+          const v = list[i++];
+          await downloadOne(v);
+        }
+      })
+    );
+    setRunning(false);
+  }
+
+  const doneCount = videos.filter((v) => dl[v.url]?.st === "done").length;
+  const pending = videos.filter((v) => selected.has(v.url) && dl[v.url]?.st !== "done").length;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <button
+          onClick={toggleAll}
+          className="rounded-full bg-white/5 px-3 py-1 text-xs text-zinc-300 hover:bg-white/10"
+        >
+          {allSelected ? "Tout désélectionner" : "☑️ Tout sélectionner"}
+        </button>
+        <button
+          onClick={bulk}
+          disabled={running || pending === 0}
+          className="rounded-lg bg-brand px-4 py-2 text-xs font-semibold text-white hover:bg-brand-dark disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {running
+            ? `⏳ Téléchargement en masse… (${doneCount} prêt${doneCount > 1 ? "es" : "e"})`
+            : `📥 Télécharger la sélection (${pending})`}
+        </button>
+      </div>
+      {doneCount > 0 && (
+        <p className="text-xs text-zinc-500">
+          ✅ {doneCount} vidéo{doneCount > 1 ? "s" : ""} prête{doneCount > 1 ? "s" : ""} — clique
+          « enregistrer » sur chaque ligne.
+        </p>
+      )}
+      <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
+        {videos.map((v) => (
+          <ProfileVideoRow
+            key={v.url}
+            v={v}
+            checked={selected.has(v.url)}
+            onToggle={() => toggle(v.url)}
+            state={dl[v.url]}
+            onDownload={() => downloadOne(v)}
+            busy={running}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ProfileVideoRow({
+  v,
+  checked,
+  onToggle,
+  state,
+  onDownload,
+  busy,
+}: {
+  v: ProfileVideo;
+  checked: boolean;
+  onToggle: () => void;
+  state?: DlState;
+  onDownload: () => void;
+  busy: boolean;
+}) {
+  const st = state?.st;
   return (
     <div className="flex items-center gap-3 rounded-lg bg-black/20 px-3 py-2 text-sm">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={onToggle}
+        className="h-4 w-4 shrink-0 accent-emerald-500"
+      />
       {v.thumbnail ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
@@ -388,27 +572,29 @@ function ProfileVideoRow({ v }: { v: ProfileVideo }) {
         <span className="flex h-12 w-9 items-center justify-center rounded bg-white/5">🎬</span>
       )}
       <span className="min-w-0 flex-1 truncate text-zinc-300">{v.title || v.id || "Vidéo"}</span>
-      {st === "idle" && (
+      {!st && (
         <button
-          onClick={grab}
-          className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-dark"
+          onClick={onDownload}
+          disabled={busy}
+          className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-dark disabled:opacity-50"
         >
           Télécharger
         </button>
       )}
+      {st === "waiting" && <span className="text-xs text-zinc-500">🕐 en file…</span>}
       {st === "processing" && <span className="text-xs text-zinc-500">⏳ en cours…</span>}
       {st === "error" && (
         <button
-          onClick={grab}
-          title={err || ""}
+          onClick={onDownload}
+          title={state?.err || ""}
           className="rounded-lg bg-red-500/20 px-3 py-1.5 text-xs text-red-300 hover:bg-red-500/30"
         >
           ⚠️ réessayer
         </button>
       )}
-      {st === "done" && dl && (
+      {st === "done" && state?.url && (
         <a
-          href={dl}
+          href={state.url}
           download
           className="rounded-lg bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25"
         >
