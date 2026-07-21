@@ -48,9 +48,17 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// GET /api/jobs — historique : les 30 derniers téléchargements réussis,
-// avec la légende et les liens de l'auteur quand on les a.
-export async function GET() {
+// GET /api/jobs — historique PRIVÉ : réservé au proprio.
+// Il faut fournir ?pw=<mot de passe> correspondant à OWNER_HISTORY_PW (variable
+// d'environnement Vercel). Sans mot de passe correct → aucun historique renvoyé,
+// donc personne d'autre ne voit les téléchargements.
+export async function GET(req: NextRequest) {
+  const owner = (process.env.OWNER_HISTORY_PW || "").trim();
+  const pw = (req.nextUrl.searchParams.get("pw") || "").trim();
+  if (!owner || pw !== owner) {
+    // Mauvais mot de passe (ou historique non configuré) : rien à montrer.
+    return NextResponse.json({ items: [], locked: true }, { status: 200 });
+  }
   const base = `FROM jobs WHERE type IN ('tiktok','instagram') AND status='done'
        ORDER BY created_at DESC LIMIT 30`;
   try {
