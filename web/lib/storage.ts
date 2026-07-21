@@ -26,18 +26,30 @@ export function signedPutUrl(key: string, contentType = "video/mp4") {
   );
 }
 
+const MIME: Record<string, string> = {
+  mp4: "video/mp4",
+  mov: "video/quicktime",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+};
+
 // URL signée pour télécharger un résultat (GET).
 // ResponseContentDisposition force le navigateur à TÉLÉCHARGER le fichier
 // (au lieu de l'ouvrir/le lire dans l'onglet), même en cross-origin.
+// Le type/nom sont déduits de l'extension de la clé (vidéo mp4 OU image jpg/png).
 export function signedGetUrl(key: string, expiresIn = 60 * 60 * 24) {
   const filename = key.split("/").pop() || "clipforge.mp4";
+  const ext = (filename.split(".").pop() || "mp4").toLowerCase();
+  const contentType = MIME[ext] || "application/octet-stream";
   return getSignedUrl(
     s3,
     new GetObjectCommand({
       Bucket: BUCKET,
       Key: key,
       ResponseContentDisposition: `attachment; filename="${filename}"`,
-      ResponseContentType: "video/mp4",
+      ResponseContentType: contentType,
     }),
     { expiresIn }
   );
