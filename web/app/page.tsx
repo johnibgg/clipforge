@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-type Tool = "tiktok" | "instagram" | "caption" | "uniquify" | "subtitles" | "profile" | "history";
+type Tool = "tiktok" | "instagram" | "caption" | "uniquify" | "subtitles" | "profile" | "edit" | "history";
 type Status = "idle" | "uploading" | "processing" | "done" | "error";
 
 type VideoMeta = {
@@ -19,6 +19,7 @@ const TABS: { key: Tool; label: string; emoji: string; desc: string }[] = [
   { key: "caption", label: "Légende", emoji: "✍️", desc: "Upload une vidéo + une légende → rendu propre." },
   { key: "uniquify", label: "Rendre unique", emoji: "🌀", desc: "Même vidéo, empreinte différente pour le repost." },
   { key: "subtitles", label: "Sous-titres", emoji: "💬", desc: "Transcription auto de la voix → sous-titres incrustés." },
+  { key: "edit", label: "Éditer", emoji: "🎬", desc: "Plusieurs vidéos + une légende chacune → versions éditées HD (uniques, prêtes à poster)." },
   { key: "history", label: "Historique", emoji: "🕘", desc: "Tes téléchargements passés — légendes et liens des auteurs." },
 ];
 
@@ -86,6 +87,8 @@ export default function Home() {
           />
         ) : tab === "profile" ? (
           <ProfileTool key={tab} />
+        ) : tab === "edit" ? (
+          <EditTool key={tab} />
         ) : tab === "history" ? (
           <HistoryTool key={tab} />
         ) : (
@@ -1025,6 +1028,281 @@ function VideoTool({ tool }: { tool: "caption" | "uniquify" | "subtitles" }) {
         label={pack ? "Générer le pack" : "Lancer"}
       />
       <ResultsList results={results} globalError={globalError} />
+    </div>
+  );
+}
+
+// ---- Éditer : lot de vidéos, chacune uniquisée + légende incrustée (façon bot drive), HD ----
+
+type EditItem = {
+  id: number;
+  mode: "file" | "link";
+  file: File | null;
+  url: string;
+  caption: string;
+  status: "idle" | "processing" | "done" | "error";
+  downloadUrl?: string;
+  error?: string;
+};
+
+let editSeq = 0;
+function newEditItem(): EditItem {
+  return { id: ++editSeq, mode: "file", file: null, url: "", caption: "", status: "idle" };
+}
+
+function EditTool() {
+  const [items, setItems] = useState<EditItem[]>([newEditItem()]);
+  const [format, setFormat] = useState("original");
+  const [busy, setBusy] = useState(false);
+
+  function update(id: number, patch: Partial<EditItem>) {
+    setItems((its) => its.map((it) => (it.id === id ? { ...it, ...patch } : it)));
+  }
+  function addItem() {
+    setItems((its) => [...its, newEditItem()]);
+  }
+  function removeItem(id: number) {
+    setItems((its) => (its.length > 1 ? its.filter((it) => it.id !== id) : its));
+  }
+  function ready(it: EditItem) {
+    return it.mode === "file" ? !!it.file : it.url.trim().length > 5;
+  }
+
+  async function pollEdit(jobId: string): Promise<string> {
+    // Édition HD pleine durée + file d'attente : on laisse jusqu'à ~15 min.
+    for (let i = 0; i < 300; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      const j = await (await fetch(`/api/jobs/${jobId}`)).json();
+      if (j.status === "done") return j.downloadUrl as string;
+      if (j.status === "error") throw new Error(j.error || "Le traitement a échoué.");
+    }
+    throw new Error("Délai dépassé.");
+  }
+
+  async function processItem(it: EditItem): Promise<string> {
+    const fmt = format !== "original" ? format : undefined;
+    if (it.mode === "link") {
+      const res = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "edit",
+          params: { url: it.url.trim(), caption: it.caption, format: fmt },
+        }),
+      });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error);
+      return pollEdit(j.id);
+    }
+    const res = await fetch("/api/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ type: "edit", params: { caption: it.caption, format: fmt } }),
+    });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error);
+    const put = await fetch(j.uploadUrl, {
+      method: "PUT",
+      headers: { "content-type": "video/mp4" },
+      body: it.file!,
+    });
+    if (!put.ok) throw new Error("Échec de l'upload");
+    await fetch(`/api/jobs/${j.id}/start`, { method: "POST" });
+    return pollEdit(j.id);
+  }
+
+  async function run() {
+    const todo = items.filter((it) => ready(it) && it.status !== "done");
+    if (!todo.length) return;
+    setBusy(true);
+    setItems((its) =>
+      its.map((it) =>
+        todo.find((t) => t.id === it.id) ? { ...it, status: "processing", error: undefined } : it
+      )
+    );
+    // 2 suivis à la fois côté client ; le worker traite un par un derrière.
+    let i = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(2, todo.length) }, async () => {
+        while (i < todo.length) {
+          const it = todo[i++];
+          try {
+            const url = await processItem(it);
+            update(it.id, { status: "done", downloadUrl: url });
+          } catch (e: any) {
+            update(it.id, { status: "error", error: e.message });
+          }
+        }
+      })
+    );
+    setBusy(false);
+  }
+
+  const doneCount = items.filter((it) => it.status === "done").length;
+  const readyCount = items.filter((it) => ready(it) && it.status !== "done").length;
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-lg bg-black/20 px-4 py-3 text-xs text-zinc-400">
+        🎬 Chaque vidéo est <b className="text-zinc-200">rendue unique</b> (recadrage, teinte et
+        vitesse imperceptibles, métadonnées effacées) et reçoit sa{" "}
+        <b className="text-zinc-200">légende incrustée</b> au centre — sortie HD, prête à reposter.
+        Ajoute autant de vidéos que tu veux, une légende par vidéo.
+      </div>
+
+      <div className="space-y-3">
+        {items.map((it, idx) => (
+          <EditRow
+            key={it.id}
+            index={idx + 1}
+            item={it}
+            onChange={(patch) => update(it.id, patch)}
+            onRemove={() => removeItem(it.id)}
+            canRemove={items.length > 1}
+            busy={busy}
+          />
+        ))}
+      </div>
+
+      <button
+        onClick={addItem}
+        disabled={busy}
+        className="w-full rounded-lg border border-dashed border-white/20 bg-black/10 px-4 py-2.5 text-sm text-zinc-300 hover:border-brand disabled:opacity-50"
+      >
+        ➕ Ajouter une vidéo
+      </button>
+
+      <div>
+        <p className="mb-1 text-xs text-zinc-500">Format d'export (toutes les vidéos)</p>
+        <div className="flex gap-2">
+          {FORMATS.map((f) => (
+            <button
+              key={f.key}
+              onClick={() => setFormat(f.key)}
+              disabled={busy}
+              className={`flex-1 rounded-lg px-3 py-2 text-sm ${
+                format === f.key ? "bg-brand text-white" : "bg-white/5 text-zinc-300"
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <RunButton
+        disabled={busy || readyCount === 0}
+        onClick={run}
+        status={busy ? "processing" : "idle"}
+        label={readyCount > 1 ? `Éditer ${readyCount} vidéos` : "Éditer la vidéo"}
+      />
+      {busy && (
+        <p className="text-center text-sm text-zinc-400">
+          ⏳ Édition en cours — les vidéos s'affichent au fur et à mesure…
+        </p>
+      )}
+      {doneCount > 0 && (
+        <p className="text-xs text-zinc-500">
+          ✅ {doneCount} vidéo{doneCount > 1 ? "s" : ""} prête{doneCount > 1 ? "s" : ""} — clique
+          « télécharger » sur chaque ligne.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function EditRow({
+  index,
+  item,
+  onChange,
+  onRemove,
+  canRemove,
+  busy,
+}: {
+  index: number;
+  item: EditItem;
+  onChange: (patch: Partial<EditItem>) => void;
+  onRemove: () => void;
+  canRemove: boolean;
+  busy: boolean;
+}) {
+  return (
+    <div className="space-y-2 rounded-xl border border-white/10 bg-black/20 p-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-zinc-400">Vidéo {index}</span>
+        <div className="flex items-center gap-2">
+          <div className="flex overflow-hidden rounded-lg bg-white/5 text-xs">
+            {(["file", "link"] as const).map((m) => (
+              <button
+                key={m}
+                disabled={busy}
+                onClick={() => onChange({ mode: m })}
+                className={`px-3 py-1 ${
+                  item.mode === m ? "bg-brand text-white" : "text-zinc-300"
+                }`}
+              >
+                {m === "file" ? "📁 Fichier" : "🔗 Lien"}
+              </button>
+            ))}
+          </div>
+          {canRemove && (
+            <button
+              onClick={onRemove}
+              disabled={busy}
+              title="Retirer cette vidéo"
+              className="rounded-lg bg-white/5 px-2 py-1 text-xs text-zinc-400 hover:bg-red-500/20 hover:text-red-300 disabled:opacity-50"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      </div>
+
+      {item.mode === "file" ? (
+        <label className="block cursor-pointer rounded-lg border border-dashed border-white/20 bg-black/20 px-4 py-4 text-center hover:border-brand">
+          <input
+            type="file"
+            accept="video/*"
+            className="hidden"
+            disabled={busy}
+            onChange={(e) => onChange({ file: e.target.files?.[0] || null })}
+          />
+          <span className="text-sm text-zinc-300">
+            {item.file ? item.file.name : "Choisir une vidéo (mp4)"}
+          </span>
+        </label>
+      ) : (
+        <input
+          value={item.url}
+          disabled={busy}
+          onChange={(e) => onChange({ url: e.target.value })}
+          placeholder="https://www.instagram.com/reel/…  ou lien TikTok"
+          className="w-full rounded-lg border border-white/10 bg-black/30 px-4 py-2.5 text-sm outline-none focus:border-brand"
+        />
+      )}
+
+      <textarea
+        value={item.caption}
+        disabled={busy}
+        onChange={(e) => onChange({ caption: e.target.value })}
+        placeholder="Légende de cette vidéo (incrustée au centre)…"
+        rows={2}
+        className="w-full rounded-lg border border-white/10 bg-black/30 px-4 py-2.5 text-sm outline-none focus:border-brand"
+      />
+
+      {item.status === "processing" && (
+        <p className="text-xs text-zinc-500">⏳ édition en cours…</p>
+      )}
+      {item.status === "error" && <p className="text-xs text-red-300">⚠️ {item.error}</p>}
+      {item.status === "done" && item.downloadUrl && (
+        <a
+          href={item.downloadUrl}
+          download
+          className="inline-block rounded-lg bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25"
+        >
+          ✅ télécharger
+        </a>
+      )}
     </div>
   );
 }
