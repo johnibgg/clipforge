@@ -321,7 +321,24 @@ function MetaCard({ meta }: { meta: VideoMeta | null }) {
 
 // ---- Compte : liste les vidéos d'un profil TikTok/Instagram à télécharger ----
 
-type ProfileVideo = { url: string; id: string; title: string; thumbnail: string };
+type ProfileVideo = {
+  url: string;
+  id: string;
+  title: string;
+  thumbnail: string;
+  views?: number | null;
+  likes?: number | null;
+  comments?: number | null;
+  isImage?: boolean;
+};
+
+// Formate un compteur : 1234 → « 1,2 k », 2500000 → « 2,5 M ».
+function fmtCount(n?: number | null): string {
+  if (n == null || !Number.isFinite(n)) return "";
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(".0", "").replace(".", ",") + " M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1).replace(".0", "").replace(".", ",") + " k";
+  return String(n);
+}
 
 function ProfileTool() {
   const [url, setUrl] = useState("");
@@ -335,7 +352,7 @@ function ProfileTool() {
   // visiteurs (contrairement à TikTok qui fonctionne).
   function emptyMsg() {
     if (url.includes("instagram.")) {
-      return "Instagram ne permet pas de lister les vidéos d'un compte sans être connecté. Utilise plutôt l'onglet « Reels IG » en collant le lien direct d'un reel ou d'un post. (Le listing de compte marche pour TikTok.)";
+      return "Instagram a bloqué la liste de ce compte (compte privé, ou accès restreint depuis le serveur). Réessaie dans un instant, ou colle directement le lien d'un reel/post dans l'onglet « Insta ».";
     }
     return "Aucune vidéo trouvée — compte privé, ou la plateforme bloque le listing. Réessaie, ou colle directement le lien d'une vidéo.";
   }
@@ -582,7 +599,17 @@ function ProfileVideoRow({
       ) : (
         <span className="flex h-12 w-9 items-center justify-center rounded bg-white/5">🎬</span>
       )}
-      <span className="min-w-0 flex-1 truncate text-zinc-300">{v.title || v.id || "Vidéo"}</span>
+      <div className="min-w-0 flex-1">
+        <span className="block truncate text-zinc-300">{v.title || v.id || "Vidéo"}</span>
+        {(v.views != null || v.likes != null) && (
+          <span className="mt-0.5 flex items-center gap-3 text-xs text-zinc-500">
+            {v.views != null && <span>👁 {fmtCount(v.views)}</span>}
+            {v.likes != null && <span>❤️ {fmtCount(v.likes)}</span>}
+            {v.comments != null && <span>💬 {fmtCount(v.comments)}</span>}
+            {v.isImage && <span className="text-zinc-600">📷 photo</span>}
+          </span>
+        )}
+      </div>
       {!st && (
         <button
           onClick={onDownload}
