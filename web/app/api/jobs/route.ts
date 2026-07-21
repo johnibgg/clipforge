@@ -13,7 +13,9 @@ export async function POST(req: NextRequest) {
     const type = body.type as JobType;
     const params = (body.params || {}) as Record<string, unknown>;
 
-    if (!["tiktok", "instagram", "caption", "uniquify", "subtitles", "profile"].includes(type)) {
+    if (
+      !["tiktok", "instagram", "caption", "uniquify", "subtitles", "profile", "edit"].includes(type)
+    ) {
       return NextResponse.json({ error: "type invalide" }, { status: 400 });
     }
 
@@ -26,7 +28,15 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ id });
     }
 
-    // caption / uniquify : on crée le job, puis on renvoie une URL d'upload directe.
+    // « edit » avec un lien (TikTok/Instagram) : pas d'upload, le worker télécharge.
+    if (type === "edit" && typeof params.url === "string" && params.url) {
+      const id = await createJob(type, params);
+      await triggerWorker(id);
+      return NextResponse.json({ id });
+    }
+
+    // caption / uniquify / subtitles / edit-fichier : on crée le job,
+    // puis on renvoie une URL d'upload directe pour le fichier source.
     const id = await createJob(type, params);
     const inputKey = `inputs/${id}.mp4`;
     await pool.query("UPDATE jobs SET input_key=$1 WHERE id=$2", [inputKey, id]);
