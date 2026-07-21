@@ -14,15 +14,13 @@ type VideoMeta = {
 
 const TABS: { key: Tool; label: string; emoji: string; desc: string }[] = [
   { key: "tiktok", label: "TikTok HD", emoji: "⬇️", desc: "Colle un lien TikTok → vidéo HD sans watermark." },
-  { key: "instagram", label: "Reels IG", emoji: "📸", desc: "Colle un lien de Reel Instagram → vidéo HD téléchargée." },
+  { key: "instagram", label: "Insta", emoji: "📸", desc: "Colle un lien Instagram (reel OU post photo) → téléchargé en qualité d'origine." },
   { key: "profile", label: "Compte", emoji: "👤", desc: "Colle un lien de compte TikTok ou Instagram → choisis les vidéos à télécharger." },
   { key: "caption", label: "Légende", emoji: "✍️", desc: "Upload une vidéo + une légende → rendu propre." },
   { key: "uniquify", label: "Rendre unique", emoji: "🌀", desc: "Même vidéo, empreinte différente pour le repost." },
   { key: "subtitles", label: "Sous-titres", emoji: "💬", desc: "Transcription auto de la voix → sous-titres incrustés." },
   { key: "edit", label: "Éditer", emoji: "🎬", desc: "Plusieurs vidéos + une légende chacune → versions éditées HD (uniques, prêtes à poster)." },
-  // Onglet "Historique" retiré du menu (il montrait les téléchargements de tous
-  // les visiteurs). Le composant HistoryTool et l'API GET /api/jobs restent en
-  // place pour un usage futur (ex : historique privé par compte).
+  { key: "history", label: "Historique", emoji: "🔒", desc: "Ton historique privé — visible uniquement avec ton mot de passe." },
 ];
 
 function Logo({ size = 52 }: { size?: number }) {
@@ -62,8 +60,10 @@ export default function Home() {
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
-            className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
-              tab === t.key ? "bg-brand text-white" : "text-zinc-300 hover:bg-white/5"
+            className={`rounded-lg px-3 py-2 text-sm font-medium transition-all duration-200 ${
+              tab === t.key
+                ? "bg-gradient-to-br from-brand to-brand-dark text-white shadow-lg shadow-brand/30 scale-[1.02]"
+                : "text-zinc-300 hover:bg-white/10 hover:text-white"
             }`}
           >
             <span className="mr-1">{t.emoji}</span>
@@ -331,6 +331,15 @@ function ProfileTool() {
   const [authorUrl, setAuthorUrl] = useState("");
   const [videos, setVideos] = useState<ProfileVideo[]>([]);
 
+  // Message d'erreur adapté : Instagram bloque le listing des comptes pour les
+  // visiteurs (contrairement à TikTok qui fonctionne).
+  function emptyMsg() {
+    if (url.includes("instagram.")) {
+      return "Instagram ne permet pas de lister les vidéos d'un compte sans être connecté. Utilise plutôt l'onglet « Reels IG » en collant le lien direct d'un reel ou d'un post. (Le listing de compte marche pour TikTok.)";
+    }
+    return "Aucune vidéo trouvée — compte privé, ou la plateforme bloque le listing. Réessaie, ou colle directement le lien d'une vidéo.";
+  }
+
   async function run() {
     setBusy(true);
     setError(null);
@@ -354,10 +363,7 @@ function ProfileTool() {
           setAuthor(m.author || "");
           setAuthorUrl(m.authorUrl || "");
           setVideos(vids);
-          if (!vids.length)
-            setError(
-              "Aucune vidéo trouvée — compte privé, ou la plateforme bloque le listing. Réessaie, ou colle directement le lien d'une vidéo."
-            );
+          if (!vids.length) setError(emptyMsg());
           setBusy(false);
           return;
         }
@@ -365,7 +371,7 @@ function ProfileTool() {
       }
       throw new Error("Délai dépassé.");
     } catch (e: any) {
-      setError(e.message);
+      setError(url.includes("instagram.") ? emptyMsg() : e.message);
       setBusy(false);
     }
   }
@@ -624,17 +630,58 @@ type HistoryItem = {
 
 function HistoryTool() {
   const [items, setItems] = useState<HistoryItem[] | null>(null);
+  const [pw, setPw] = useState("");
+  const [unlocked, setUnlocked] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetch("/api/jobs")
-      .then((r) => r.json())
-      .then((j) => setItems(j.items || []))
-      .catch(() => setError("Impossible de charger l'historique."));
-  }, []);
+  async function unlock() {
+    setBusy(true);
+    setError(null);
+    try {
+      const j = await (await fetch(`/api/jobs?pw=${encodeURIComponent(pw)}`)).json();
+      if (j.locked) {
+        setError("Mot de passe incorrect (ou historique non configuré).");
+        setBusy(false);
+        return;
+      }
+      setItems(j.items || []);
+      setUnlocked(true);
+    } catch {
+      setError("Impossible de charger l'historique.");
+    }
+    setBusy(false);
+  }
 
-  if (error)
-    return <p className="rounded-lg bg-red-500/10 px-4 py-3 text-sm text-red-300">⚠️ {error}</p>;
+  // Écran de déverrouillage : personne ne voit l'historique sans le mot de passe.
+  if (!unlocked) {
+    return (
+      <div className="space-y-4">
+        <div className="rounded-lg bg-black/20 px-4 py-3 text-sm text-zinc-400">
+          🔒 Historique privé — réservé à toi. Entre ton mot de passe proprio pour
+          voir tes téléchargements. Personne d'autre ne peut y accéder.
+        </div>
+        <input
+          type="password"
+          value={pw}
+          onChange={(e) => setPw(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && pw && unlock()}
+          placeholder="Mot de passe proprio"
+          className="w-full rounded-lg border border-white/10 bg-black/30 px-4 py-3 outline-none focus:border-brand"
+        />
+        {error && (
+          <p className="rounded-lg bg-red-500/10 px-4 py-3 text-sm text-red-300">⚠️ {error}</p>
+        )}
+        <RunButton
+          disabled={!pw || busy}
+          onClick={unlock}
+          status={busy ? "processing" : "idle"}
+          label="Déverrouiller"
+        />
+      </div>
+    );
+  }
+
   if (items === null)
     return <p className="text-center text-sm text-zinc-400">⏳ Chargement de l'historique…</p>;
   if (!items.length)
