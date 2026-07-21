@@ -29,7 +29,14 @@ pool.on("error", (err) => {
 
 globalForPg.pgPool = pool;
 
-export type JobType = "tiktok" | "instagram" | "caption" | "uniquify" | "subtitles" | "profile";
+export type JobType =
+  | "tiktok"
+  | "instagram"
+  | "caption"
+  | "uniquify"
+  | "subtitles"
+  | "profile"
+  | "edit";
 
 export async function createJob(
   type: JobType,
