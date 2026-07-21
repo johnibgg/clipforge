@@ -20,7 +20,9 @@ const TABS: { key: Tool; label: string; emoji: string; desc: string }[] = [
   { key: "uniquify", label: "Rendre unique", emoji: "🌀", desc: "Même vidéo, empreinte différente pour le repost." },
   { key: "subtitles", label: "Sous-titres", emoji: "💬", desc: "Transcription auto de la voix → sous-titres incrustés." },
   { key: "edit", label: "Éditer", emoji: "🎬", desc: "Plusieurs vidéos + une légende chacune → versions éditées HD (uniques, prêtes à poster)." },
-  { key: "history", label: "Historique", emoji: "🕘", desc: "Tes téléchargements passés — légendes et liens des auteurs." },
+  // Onglet "Historique" retiré du menu (il montrait les téléchargements de tous
+  // les visiteurs). Le composant HistoryTool et l'API GET /api/jobs restent en
+  // place pour un usage futur (ex : historique privé par compte).
 ];
 
 function Logo({ size = 52 }: { size?: number }) {
