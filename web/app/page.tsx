@@ -23,6 +23,90 @@ const TABS: { key: Tool; label: string; emoji: string; desc: string }[] = [
   { key: "history", label: "Historique", emoji: "🔒", desc: "Ton historique privé — visible uniquement avec ton mot de passe." },
 ];
 
+// --- Fiabilité réseau (lot de ~20 vidéos sur mobile) ---
+// Les erreurs « échec d'upload / échec d'appel » sont presque toujours des coupures
+// réseau passagères (surtout en 4G, avec beaucoup de vidéos d'affilée) ou un worker
+// gratuit qui se réveille. On réessaie automatiquement au lieu de faire échouer la vidéo.
+async function fetchRetry(
+  input: string,
+  init?: RequestInit,
+  tries = 4
+): Promise<Response> {
+  let lastErr: any;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    try {
+      const res = await fetch(input, init);
+      // 5xx = souci serveur passager (worker qui démarre, surcharge) → on réessaie.
+      if (res.status >= 500 && attempt < tries - 1) {
+        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+        continue;
+      }
+      return res;
+    } catch (e) {
+      // fetch a carrément échoué (réseau coupé) → on réessaie.
+      lastErr = e;
+      if (attempt < tries - 1) {
+        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+        continue;
+      }
+    }
+  }
+  throw lastErr || new Error("Connexion instable, réessaie.");
+}
+
+// PUT d'un fichier (upload source) avec réessais : c'est l'étape qui lâchait
+// le plus souvent sur mobile quand on envoie beaucoup de vidéos à la suite.
+async function putRetry(url: string, body: Blob, tries = 4): Promise<void> {
+  let lastErr: any;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    try {
+      const put = await fetch(url, {
+        method: "PUT",
+        headers: { "content-type": "video/mp4" },
+        body,
+      });
+      if (put.ok) return;
+      lastErr = new Error("Échec de l'upload (" + put.status + ")");
+    } catch (e) {
+      lastErr = e;
+    }
+    if (attempt < tries - 1) await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+  }
+  throw lastErr || new Error("Échec de l'upload");
+}
+
+// --- Téléchargement AUTOMATIQUE (sans clic « enregistrer ») ---
+// Déclenche le téléchargement dès que la vidéo est prête. L'URL signée renvoie déjà
+// « Content-Disposition: attachment », donc le fichier se télécharge au lieu de s'ouvrir.
+// • Android/Samsung : va dans Téléchargements → visible dans la Galerie.
+// • iPhone : iOS n'autorise PAS un site web à écrire dans la galerie Photos ; le fichier
+//   arrive dans « Fichiers » (ou l'utilisateur fait Partager → Enregistrer la vidéo).
+// Les téléchargements en lot sont enchaînés (espacés) pour éviter le blocage navigateur.
+function triggerDownload(url: string) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "";
+  a.rel = "noopener";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    try { a.remove(); } catch {}
+  }, 1500);
+}
+let __dlChain: Promise<void> = Promise.resolve();
+function autoDownload(url: string | null | undefined) {
+  if (!url) return;
+  __dlChain = __dlChain.then(
+    () =>
+      new Promise<void>((resolve) => {
+        try { triggerDownload(url); } catch {}
+        // 900 ms entre deux vidéos : évite le blocage « trop de téléchargements ».
+        setTimeout(resolve, 900);
+      })
+  );
+}
+
 function Logo({ size = 52 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="ClipForge">
@@ -115,12 +199,17 @@ function useJobRunner() {
     setStatus("processing");
     for (let i = 0; i < 150; i++) {
       await new Promise((r) => setTimeout(r, 2000));
-      const res = await fetch(`/api/jobs/${id}`);
-      const j = await res.json();
+      let j: any;
+      try {
+        j = await (await fetchRetry(`/api/jobs/${id}`)).json();
+      } catch {
+        continue; // coupure réseau passagère pendant le suivi → on réessaie au tour suivant
+      }
       if (j.status === "done") {
         setDownloadUrl(j.downloadUrl);
         setMeta(j.meta || null);
         setStatus("done");
+        autoDownload(j.downloadUrl); // téléchargement auto, sans clic
         return;
       }
       if (j.status === "error") {
@@ -153,7 +242,7 @@ function UrlTool({ type, placeholder }: { type: "tiktok" | "instagram"; placehol
     setSubmittedUrl(url);
     setStatus("processing");
     try {
-      const res = await fetch("/api/jobs", {
+      const res = await fetchRetry("/api/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ type, params: { url } }),
@@ -364,7 +453,7 @@ function ProfileTool() {
     setAuthor("");
     setAuthorUrl("");
     try {
-      const res = await fetch("/api/jobs", {
+      const res = await fetchRetry("/api/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ type: "profile", params: { url } }),
@@ -373,7 +462,12 @@ function ProfileTool() {
       if (!res.ok) throw new Error(j.error);
       for (let i = 0; i < 90; i++) {
         await new Promise((r) => setTimeout(r, 2000));
-        const d = await (await fetch(`/api/jobs/${j.id}`)).json();
+        let d: any;
+        try {
+          d = await (await fetchRetry(`/api/jobs/${j.id}`)).json();
+        } catch {
+          continue;
+        }
         if (d.status === "done") {
           const m = d.meta || {};
           const vids: ProfileVideo[] = Array.isArray(m.videos) ? m.videos : [];
@@ -472,7 +566,7 @@ function ProfileVideos({ videos }: { videos: ProfileVideo[] }) {
     setOne(v.url, { st: "processing" });
     try {
       const type = v.url.includes("instagram.") ? "instagram" : "tiktok";
-      const res = await fetch("/api/jobs", {
+      const res = await fetchRetry("/api/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ type, params: { url: v.url } }),
@@ -481,9 +575,15 @@ function ProfileVideos({ videos }: { videos: ProfileVideo[] }) {
       if (!res.ok) throw new Error(j.error);
       for (let i = 0; i < 240; i++) {
         await new Promise((r) => setTimeout(r, 2500));
-        const d = await (await fetch(`/api/jobs/${j.id}`)).json();
+        let d: any;
+        try {
+          d = await (await fetchRetry(`/api/jobs/${j.id}`)).json();
+        } catch {
+          continue;
+        }
         if (d.status === "done") {
           setOne(v.url, { st: "done", url: d.downloadUrl });
+          autoDownload(d.downloadUrl); // téléchargement auto vers la galerie/fichiers
           return;
         }
         if (d.status === "error") throw new Error(d.error || "Le téléchargement a échoué.");
@@ -874,8 +974,12 @@ function VideoTool({ tool }: { tool: "caption" | "uniquify" | "subtitles" }) {
   async function pollJob(id: string): Promise<string> {
     for (let i = 0; i < 150; i++) {
       await new Promise((r) => setTimeout(r, 2000));
-      const res = await fetch(`/api/jobs/${id}`);
-      const j = await res.json();
+      let j: any;
+      try {
+        j = await (await fetchRetry(`/api/jobs/${id}`)).json();
+      } catch {
+        continue;
+      }
       if (j.status === "done") return j.downloadUrl as string;
       if (j.status === "error") throw new Error(j.error || "Le traitement a échoué.");
     }
@@ -885,20 +989,15 @@ function VideoTool({ tool }: { tool: "caption" | "uniquify" | "subtitles" }) {
   async function runOne(target: { key: string }, base: any): Promise<string> {
     const params = { ...base };
     if (target.key !== "original") params.format = target.key;
-    const res = await fetch("/api/jobs", {
+    const res = await fetchRetry("/api/jobs", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: tool, params }),
     });
     const j = await res.json();
     if (!res.ok) throw new Error(j.error);
-    const put = await fetch(j.uploadUrl, {
-      method: "PUT",
-      headers: { "content-type": "video/mp4" },
-      body: file!,
-    });
-    if (!put.ok) throw new Error("Échec de l'upload");
-    await fetch(`/api/jobs/${j.id}/start`, { method: "POST" });
+    await putRetry(j.uploadUrl, file!);
+    await fetchRetry(`/api/jobs/${j.id}/start`, { method: "POST" }).catch(() => {});
     return pollJob(j.id);
   }
 
@@ -940,6 +1039,7 @@ function VideoTool({ tool }: { tool: "caption" | "uniquify" | "subtitles" }) {
         try {
           const url = await runOne(t, base);
           setResults((rs) => rs.map((r) => (r.key === t.key ? { ...r, status: "done", url } : r)));
+          autoDownload(url); // téléchargement auto, sans clic « enregistrer »
         } catch (e: any) {
           setResults((rs) =>
             rs.map((r) => (r.key === t.key ? { ...r, status: "error", error: e.message } : r))
@@ -1148,7 +1248,12 @@ function EditTool() {
     // Édition HD pleine durée + file d'attente : on laisse jusqu'à ~15 min.
     for (let i = 0; i < 300; i++) {
       await new Promise((r) => setTimeout(r, 3000));
-      const j = await (await fetch(`/api/jobs/${jobId}`)).json();
+      let j: any;
+      try {
+        j = await (await fetchRetry(`/api/jobs/${jobId}`)).json();
+      } catch {
+        continue; // coupure passagère → on réessaie au tour suivant, sans casser le lot
+      }
       if (j.status === "done") return j.downloadUrl as string;
       if (j.status === "error") throw new Error(j.error || "Le traitement a échoué.");
     }
@@ -1158,7 +1263,7 @@ function EditTool() {
   async function processItem(it: EditItem): Promise<string> {
     const fmt = format !== "original" ? format : undefined;
     if (it.mode === "link") {
-      const res = await fetch("/api/jobs", {
+      const res = await fetchRetry("/api/jobs", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -1170,20 +1275,15 @@ function EditTool() {
       if (!res.ok) throw new Error(j.error);
       return pollEdit(j.id);
     }
-    const res = await fetch("/api/jobs", {
+    const res = await fetchRetry("/api/jobs", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "edit", params: { caption: it.caption, format: fmt } }),
     });
     const j = await res.json();
     if (!res.ok) throw new Error(j.error);
-    const put = await fetch(j.uploadUrl, {
-      method: "PUT",
-      headers: { "content-type": "video/mp4" },
-      body: it.file!,
-    });
-    if (!put.ok) throw new Error("Échec de l'upload");
-    await fetch(`/api/jobs/${j.id}/start`, { method: "POST" });
+    await putRetry(j.uploadUrl, it.file!);
+    await fetchRetry(`/api/jobs/${j.id}/start`, { method: "POST" }).catch(() => {});
     return pollEdit(j.id);
   }
 
@@ -1205,6 +1305,7 @@ function EditTool() {
           try {
             const url = await processItem(it);
             update(it.id, { status: "done", downloadUrl: url });
+            autoDownload(url); // téléchargement auto de chaque vidéo éditée
           } catch (e: any) {
             update(it.id, { status: "error", error: e.message });
           }
